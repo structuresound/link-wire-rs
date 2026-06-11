@@ -22,8 +22,17 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+pub use audio::ReceivedChunk;
 use engine::Engine;
 pub use tactus_wire as wire;
+
+/// A remote channel visible through announcements (chapter 03 §7.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleChannel {
+    pub peer_name: String,
+    pub name: String,
+    pub id: [u8; 8],
+}
 
 /// Peer configuration.
 #[derive(Debug, Clone)]
@@ -173,6 +182,132 @@ impl Link {
         if enabled && st.held_stst != wire::types::StartStopState::default() {
             st.app_playing = st.held_stst.is_playing;
         }
+    }
+
+    // ------------------------------------------------ LinkAudio (ch. 03)
+
+    /// Enable LinkAudio: advertise an audio endpoint per gateway and start
+    /// the announcement/keepalive machinery (chapter 03 §2, §4).
+    pub fn enable_audio(&self, peer_name: &str) {
+        let mut st = self.eng.lock();
+        audio::enable(&self.eng, &mut st, peer_name);
+    }
+
+    /// Disable LinkAudio: withdraw all channels and stop advertising the
+    /// audio endpoint (chapter 03 §2, §4.4).
+    pub fn disable_audio(&self) {
+        let mut st = self.eng.lock();
+        audio::disable(&self.eng, &mut st);
+    }
+
+    pub fn is_audio_enabled(&self) -> bool {
+        self.eng.lock().audio.is_some()
+    }
+
+    /// Publish a channel (create a sink); returns its channel id.
+    pub fn publish_channel(&self, name: &str) -> Option<[u8; 8]> {
+        let mut st = self.eng.lock();
+        audio::publish(&self.eng, &mut st, name).map(|id| id.0)
+    }
+
+    /// Withdraw a published channel (ChannelByes, chapter 03 §4.4).
+    pub fn unpublish_channel(&self, id: [u8; 8]) {
+        let mut st = self.eng.lock();
+        audio::unpublish(&self.eng, &mut st, wire::types::Id(id));
+    }
+
+    /// Remote channels currently visible, sorted by peer name then channel
+    /// name, deduplicated across gateways.
+    pub fn visible_channels(&self) -> Vec<VisibleChannel> {
+        let st = self.eng.lock();
+        let Some(audio) = st.audio.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<VisibleChannel> = audio
+            .known
+            .iter()
+            .map(|((id, _), kc)| VisibleChannel {
+                peer_name: String::from_utf8_lossy(&kc.peer_name).into_owned(),
+                name: String::from_utf8_lossy(&kc.name).into_owned(),
+                id: id.0,
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.peer_name, &a.name, &a.id).cmp(&(&b.peer_name, &b.name, &b.id)));
+        out.dedup_by_key(|c| c.id);
+        out
+    }
+
+    /// Subscribe to a remote channel: ChannelRequest now and every 5 s
+    /// (chapter 03 §4.3, §7.4).
+    pub fn subscribe_channel(&self, id: [u8; 8], quantum: f64) {
+        let mut st = self.eng.lock();
+        audio::subscribe(
+            &self.eng,
+            &mut st,
+            wire::types::Id(id),
+            quantum_micro_beats(quantum),
+        );
+    }
+
+    /// Drop a subscription (StopChannelRequest, chapter 03 §4.3).
+    pub fn unsubscribe_channel(&self, id: [u8; 8]) {
+        let mut st = self.eng.lock();
+        audio::unsubscribe(&self.eng, &mut st, wire::types::Id(id));
+    }
+
+    /// Write beat-stamped PCM into a published channel. `begin_app_beat` is
+    /// the application beat (as returned by [`Link::beat_at_time`] at
+    /// `quantum`) of the first frame; the sink transmits full datagrams to
+    /// every unexpired requester (chapter 03 §5, §6.3).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_channel(
+        &self,
+        id: [u8; 8],
+        samples: &[i16],
+        sample_rate: u32,
+        channels: u8,
+        begin_app_beat: f64,
+        quantum: f64,
+    ) {
+        let mut st = self.eng.lock();
+        audio::write_sink(
+            &self.eng,
+            &mut st,
+            wire::types::Id(id),
+            samples,
+            sample_rate,
+            channels,
+            begin_app_beat,
+            quantum_micro_beats(quantum),
+        );
+    }
+
+    /// Drain chunks received on a subscription, each mapped onto the local
+    /// beat grid (chapter 03 §6.4, §7.4).
+    pub fn poll_channel(&self, id: [u8; 8]) -> Vec<audio::ReceivedChunk> {
+        let mut st = self.eng.lock();
+        st.audio
+            .as_mut()
+            .and_then(|a| a.sources.get_mut(&wire::types::Id(id)))
+            .map(|s| s.inbox.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// True while subscribed audio is arriving (within the last second).
+    pub fn is_receiving(&self, id: [u8; 8]) -> bool {
+        let st = self.eng.lock();
+        audio::is_receiving(&st, wire::types::Id(id), self.eng.now())
+    }
+
+    /// True while at least one peer holds an unexpired request for the
+    /// channel (the sink would transmit written audio).
+    pub fn has_requesters(&self, id: [u8; 8]) -> bool {
+        let st = self.eng.lock();
+        let now = self.eng.now();
+        st.audio
+            .as_ref()
+            .and_then(|a| a.sinks.iter().find(|s| s.id == wire::types::Id(id)))
+            .is_some_and(|s| s.requesters.values().any(|e| *e > now))
     }
 
     /// Test hook: go silent *without* a ByeBye, as a crashed peer would,
