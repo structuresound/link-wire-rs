@@ -50,6 +50,50 @@ done, by milestone:
    repo's harness against reference peers on loopback in CI. Canary against
    upstream HEAD is future work.
 
+## Testing and conformance
+
+Three layers, from hermetic to interop:
+
+1. **Unit + golden vectors** — `cargo test --workspace`. The vector tests
+   need a checkout of link-wire-spec, found via `LINK_WIRE_SPEC_DIR` or a
+   sibling `../link-wire-spec` directory; they skip (with a notice) when
+   absent, and CI sets `REQUIRE_VECTORS=1` so absence fails there. Includes
+   the candidate-vs-candidate contract run (two `conformance-peer`
+   processes driven through every harness scenario), so the full suite
+   passes inside the clean room with no reference software involved.
+2. **CI** ([ci.yml](.github/workflows/ci.yml)) — fmt, clippy, the test
+   suite against the pinned spec release (`SPEC_REF`), and
+   `cargo deny check bans licenses sources` (the dependency-level firewall;
+   see [deny.toml](deny.toml)).
+3. **Reference interop** ([conformance.yml](.github/workflows/conformance.yml))
+   — runs the spec repo's [conformance harness](https://github.com/structuresound/link-wire-spec/tree/main/conformance)
+   against `conformance-peer`: reference and candidate side by side on
+   loopback in an isolated network namespace, scenarios
+   `discovery-join-leave`, `tempo-follow`, `start-stop`, `beat-alignment`,
+   and `audio-stream`. The observation log is uploaded as the
+   `conformance-observations` artifact.
+
+To run the reference interop locally (requires Linux, root for the network
+namespace, and the build/JACK packages listed in the workflow):
+
+```sh
+cargo build --release -p tactus --bin conformance-peer
+git clone https://github.com/structuresound/link-wire-spec /tmp/link-wire-spec
+git -C /tmp/link-wire-spec checkout <SPEC_REF from the workflow>
+export CANDIDATE_CMD="$PWD/target/release/conformance-peer"
+export CANDIDATE_FEATURES=audio
+sudo --preserve-env=CANDIDATE_CMD,CANDIDATE_FEATURES \
+  bash /tmp/link-wire-spec/conformance/run-isolated.sh   # [scenario ...]
+```
+
+**Firewall rules for that run (PROVENANCE.md):** the harness clones and
+builds the GPL reference into a work directory *outside* this repository —
+never vendor it, never open files under its cache, and treat the `OBS |`
+lines as the only output you act on. A clean-room authoring session must
+not run it at all (it has no github.com access by design); consume the CI
+artifact instead. Anyone who *has* read reference source is permanently
+"dirty" and may contribute observations, not code.
+
 ## Affiliation
 
 This project is not affiliated with, endorsed by, or sponsored by Ableton AG.

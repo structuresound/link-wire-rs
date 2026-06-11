@@ -11,7 +11,7 @@ env:
   # Spec release the implementation targets (v0.4.0 content; the spec repo
   # has not pushed release tags yet, so pin the commit directly).
   SPEC_REPO: structuresound/link-wire-spec
-  SPEC_REF: da7a38cfa9c3e9d3941b1e0348b026a533878623
+  SPEC_REF: da7a38c543c52433a5476f415c36c5de2008d32f
 
 jobs:
   test:
