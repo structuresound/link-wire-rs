@@ -17,9 +17,11 @@ permissions:
 
 env:
   SPEC_REPO: structuresound/link-wire-spec
-  # The spec release this candidate targets: v0.4.0 content. The spec repo
-  # has not pushed release tags yet (issue filed); pin the commit directly.
-  SPEC_REF: da7a38c543c52433a5476f415c36c5de2008d32f
+  # The spec content this candidate targets: v0.4.0 plus the harness
+  # fixes on the spec repo's claude/hopeful-ride-u0k49i branch (closed-loop
+  # tempo driving). Move this pin to a release tag once one exists
+  # (link-wire-spec issue #4) and the branch is merged.
+  SPEC_REF: c3fa146823e284a2abc62eae59075c75d4e58f09
 
 jobs:
   conformance:
@@ -38,8 +40,10 @@ jobs:
 
       - name: Fetch spec + harness at pinned release (outside the workspace)
         run: |
-          git clone --depth 50 "https://github.com/$SPEC_REPO.git" "$RUNNER_TEMP/link-wire-spec"
-          git -C "$RUNNER_TEMP/link-wire-spec" checkout "$SPEC_REF"
+          git init -q "$RUNNER_TEMP/link-wire-spec"
+          git -C "$RUNNER_TEMP/link-wire-spec" remote add origin "https://github.com/$SPEC_REPO.git"
+          git -C "$RUNNER_TEMP/link-wire-spec" fetch -q --depth 1 origin "$SPEC_REF"
+          git -C "$RUNNER_TEMP/link-wire-spec" checkout -q FETCH_HEAD
 
       - name: Install harness dependencies
         run: |
@@ -54,6 +58,7 @@ jobs:
           CANDIDATE_FEATURES: audio
           LINK_CAPTURE_WORK: ${{ runner.temp }}/link-reference
         run: |
+          set -o pipefail
           sudo --preserve-env=CANDIDATE_CMD,CANDIDATE_FEATURES,LINK_CAPTURE_WORK \
             bash "$RUNNER_TEMP/link-wire-spec/conformance/run-isolated.sh" \
             | tee conformance-observations.txt

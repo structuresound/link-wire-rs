@@ -8,10 +8,11 @@ permissions:
   contents: read
 
 env:
-  # Spec release the implementation targets (v0.4.0 content; the spec repo
-  # has not pushed release tags yet, so pin the commit directly).
+  # Spec content the implementation targets: v0.4.0 plus harness fixes on
+  # the spec repo's claude/hopeful-ride-u0k49i branch (vectors unchanged).
+  # Move to a release tag once one exists (link-wire-spec issue #4).
   SPEC_REPO: structuresound/link-wire-spec
-  SPEC_REF: da7a38c543c52433a5476f415c36c5de2008d32f
+  SPEC_REF: c3fa146823e284a2abc62eae59075c75d4e58f09
 
 jobs:
   test:
