@@ -11,5 +11,5 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 tactus-wire = { path = "crates/tactus-wire", version = "0.1.0" }
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 getrandom = "0.3"

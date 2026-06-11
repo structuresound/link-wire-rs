@@ -163,6 +163,39 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
     w.into_vec()
 }
 
+/// The fixed 20-byte frame prefix (chapter 01 §3), decodable independently
+/// of the payload: a receiver answers an Alive with a Response *before*
+/// processing the payload and regardless of whether it parses (§4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    pub msg_type: u8,
+    pub ttl: u8,
+    pub group_id: u16,
+    pub node: NodeId,
+}
+
+impl Header {
+    pub fn is_alive(&self) -> bool {
+        self.msg_type == TYPE_ALIVE
+    }
+}
+
+pub fn decode_header(datagram: &[u8]) -> Result<Header> {
+    let mut r = Reader::new(datagram);
+    if r.remaining() < 20 {
+        return Err(Error::Truncated);
+    }
+    if r.take(8)? != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    Ok(Header {
+        msg_type: r.u8()?,
+        ttl: r.u8()?,
+        group_id: r.u16()?,
+        node: NodeId::read(&mut r)?,
+    })
+}
+
 pub fn decode(datagram: &[u8]) -> Result<Frame> {
     let mut r = Reader::new(datagram);
     if r.remaining() < 20 {
