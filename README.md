@@ -35,13 +35,19 @@ done, by milestone:
 1. **M1 — done.** Byte-level: every packet in the spec's golden captures
    (4,346 datagrams across five scenarios) decodes and re-encodes
    byte-for-byte (`crates/tactus-wire/tests/vectors.rs`).
-2. **M2** Behavioral: join a session with a reference peer on loopback;
-   converge tempo and align beat phase within tolerance.
-3. **M3** Audio: exchange PCM with a reference LinkAudio peer with correct
-   beat-time alignment.
-4. **M4** Conformance: the spec repo's harness drives reference and candidate
-   peers side by side; canary runs against upstream HEAD as a protocol-drift
-   tripwire.
+2. **M2 — done (self-interop).** Behavioral: discovery, session election,
+   tempo convergence, beat-phase alignment, start/stop, churn and ttl
+   expiry, two peers on loopback (`crates/tactus/tests/loopback.rs`).
+3. **M3 — done (self-interop).** Audio: channel lifecycle, PCM i16
+   streaming with beat-time alignment within 0.001 beat
+   (`crates/tactus/tests/audio_loopback.rs`).
+4. **M4 — wired.** `conformance-peer` (the
+   [CANDIDATE-CONTRACT](https://github.com/structuresound/link-wire-spec/blob/main/conformance/CANDIDATE-CONTRACT.md)
+   binary) is exercised end to end candidate-vs-candidate in
+   `crates/tactus/tests/conformance_contract.rs`; the
+   [conformance workflow](.github/workflows/conformance.yml) runs the spec
+   repo's harness against reference peers on loopback in CI. Canary against
+   upstream HEAD is future work.
 
 ## Affiliation
 

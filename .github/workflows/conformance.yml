@@ -1,0 +1,66 @@
+# Run the link-wire-spec conformance harness against the candidate binary
+# (adapted from the spec repo's conformance/example-candidate-ci.yml).
+#
+# The spec repo — and the GPL reference it builds — live only in the
+# runner's temp directory and caches, never in this repo's tree or
+# artifacts (clean-room firewall; see PROVENANCE.md). The job output is
+# observations only.
+
+name: conformance
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SPEC_REPO: structuresound/link-wire-spec
+  # The spec release this candidate targets: v0.4.0 content. The spec repo
+  # has not pushed release tags yet (issue filed); pin the commit directly.
+  SPEC_REF: da7a38cfa9c3e9d3941b1e0348b026a533878623
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build candidate
+        run: cargo build --release -p tactus --bin conformance-peer
+
+      - name: Fetch spec + harness at pinned release (outside the workspace)
+        run: |
+          git clone --depth 50 "https://github.com/$SPEC_REPO.git" "$RUNNER_TEMP/link-wire-spec"
+          git -C "$RUNNER_TEMP/link-wire-spec" checkout "$SPEC_REF"
+
+      - name: Install harness dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ git iproute2 util-linux python3 \
+            jackd2 libjack-jackd2-dev portaudio19-dev libasound2-dev
+
+      - name: Run conformance harness
+        env:
+          CANDIDATE_CMD: ${{ github.workspace }}/target/release/conformance-peer
+          CANDIDATE_FEATURES: audio
+          LINK_CAPTURE_WORK: ${{ runner.temp }}/link-reference
+        run: |
+          sudo --preserve-env=CANDIDATE_CMD,CANDIDATE_FEATURES,LINK_CAPTURE_WORK \
+            bash "$RUNNER_TEMP/link-wire-spec/conformance/run-isolated.sh" \
+            | tee conformance-observations.txt
+
+      - name: Upload observation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-observations
+          path: conformance-observations.txt
