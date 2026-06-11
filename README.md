@@ -12,21 +12,36 @@ GPL reference source. The rules that make that claim auditable are in
 [PROVENANCE.md](PROVENANCE.md). Read it before contributing; PRs certify
 compliance with it.
 
+## Crates
+
+| Crate | Contents |
+|---|---|
+| [`tactus-wire`](crates/tactus-wire) | Pure wire codec: common serialization (spec ch. 00) and encode/decode for every discovery, sync, and LinkAudio v1 message (ch. 01–03). No sockets, no state. |
+| [`tactus`](crates/tactus) | The runtime peer: discovery gossip, clock measurement, session election, timeline/start-stop sync, LinkAudio sinks and sources. |
+
+*Tactus* is the early-music term for the shared steady beat an ensemble
+keeps — a tempo-sync library name with no Link branding. Neither crate is
+published yet; the names are reserved proposals pending confirmation.
+
 ## Status
 
-**Governance only — no code yet.** Implementation work happens in sessions
-and environments that have never had access to the reference source, starting
-from spec release 0.1.0. The conformance harness (which builds and runs
-upstream reference binaries as interop test peers — use of GPL software, not
-distribution) will live under `conformance/` and is the project's definition
-of done:
+Implementation work happens in sessions and environments that have never had
+access to the reference source (see [docs/CLEAN-TEAM.md](docs/CLEAN-TEAM.md)),
+built against spec release 0.4.0. The conformance harness (which builds and
+runs upstream reference binaries as interop test peers — use of GPL software,
+not distribution) integrates via CI caches only. The project's definition of
+done, by milestone:
 
-1. Byte-level: round-trip the spec's golden packet captures.
-2. Behavioral: join a session with a reference peer on loopback; converge
-   tempo and align beat phase within tolerance.
-3. Audio: exchange PCM with a reference LinkAudio peer with correct
+1. **M1 — done.** Byte-level: every packet in the spec's golden captures
+   (4,346 datagrams across five scenarios) decodes and re-encodes
+   byte-for-byte (`crates/tactus-wire/tests/vectors.rs`).
+2. **M2** Behavioral: join a session with a reference peer on loopback;
+   converge tempo and align beat phase within tolerance.
+3. **M3** Audio: exchange PCM with a reference LinkAudio peer with correct
    beat-time alignment.
-4. Canary: the same suite against upstream HEAD, as a protocol-drift tripwire.
+4. **M4** Conformance: the spec repo's harness drives reference and candidate
+   peers side by side; canary runs against upstream HEAD as a protocol-drift
+   tripwire.
 
 ## Affiliation
 

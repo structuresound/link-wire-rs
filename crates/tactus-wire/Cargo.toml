@@ -1,0 +1,12 @@
+[package]
+name = "tactus-wire"
+description = "Wire codec for the Link session protocols (discovery, sync, LinkAudio v1), implemented clean-room from link-wire-spec"
+keywords = ["tempo", "sync", "protocol", "audio"]
+categories = ["network-programming", "multimedia::audio", "encoding"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
