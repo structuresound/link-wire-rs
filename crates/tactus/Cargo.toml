@@ -1,0 +1,15 @@
+[package]
+name = "tactus"
+description = "Tempo/beat session peer wire-compatible with Link, implemented clean-room from link-wire-spec"
+keywords = ["tempo", "sync", "music", "audio"]
+categories = ["network-programming", "multimedia::audio"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tactus-wire.workspace = true
+socket2.workspace = true
+getrandom.workspace = true

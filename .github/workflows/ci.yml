@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Spec content the implementation targets: v0.4.0 plus harness fixes on
+  # the spec repo's claude/hopeful-ride-u0k49i branch (vectors unchanged).
+  # Move to a release tag once one exists (link-wire-spec issue #4).
+  SPEC_REPO: structuresound/link-wire-spec
+  SPEC_REF: c3fa146823e284a2abc62eae59075c75d4e58f09
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch spec test vectors at pinned release
+        uses: actions/checkout@v4
+        with:
+          repository: structuresound/link-wire-spec
+          ref: ${{ env.SPEC_REF }}
+          path: .spec-cache/link-wire-spec
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test (vectors required)
+        env:
+          LINK_WIRE_SPEC_DIR: ${{ github.workspace }}/.spec-cache/link-wire-spec
+          REQUIRE_VECTORS: "1"
+        run: cargo test --workspace
+
+  # Clean-room firewall: forbidden crates and copyleft licenses can never
+  # enter the dependency graph. See deny.toml and docs/CLEAN-TEAM.md.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources

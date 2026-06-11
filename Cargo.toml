@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/tactus-wire", "crates/tactus"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/structuresound/link-wire-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tactus-wire = { path = "crates/tactus-wire", version = "0.1.0" }
+socket2 = { version = "0.6", features = ["all"] }
+getrandom = "0.3"

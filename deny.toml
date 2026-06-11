@@ -1,0 +1,44 @@
+# cargo-deny configuration — part of the clean-room firewall.
+#
+# PROVENANCE.md forbids GPL implementations of this protocol as inputs.
+# The network policy of the clean-room environment cannot block crates.io
+# (we need it for legitimate dependencies), and the forbidden
+# implementations are published there — so the dependency path is closed
+# here instead. CI runs `cargo deny check bans licenses` on every push.
+
+[graph]
+all-features = true
+
+[bans]
+multiple-versions = "warn"
+# Implementations of the Link protocol. None of these may ever appear in
+# the dependency graph, at any depth, under any feature combination.
+deny = [
+    { crate = "ableton-link-rs", reason = "GPL reference binding — forbidden input per PROVENANCE.md" },
+    { crate = "ableton-link", reason = "Link implementation — forbidden input per PROVENANCE.md" },
+    { crate = "rusty_link", reason = "binds the GPL reference — forbidden input per PROVENANCE.md" },
+    { crate = "abl_link", reason = "binds the GPL reference — forbidden input per PROVENANCE.md" },
+]
+
+[licenses]
+# Belt and braces: beyond the named crates above, no copyleft-licensed
+# dependency of any kind is acceptable in an MIT clean-room artifact.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# No git dependencies at all: the clean-room network policy has no
+# github.com, and registry-only deps keep provenance auditable.
+allow-git = []
