@@ -20,8 +20,9 @@ compliance with it.
 | [`tactus`](crates/tactus) | The runtime peer: discovery gossip, clock measurement, session election, timeline/start-stop sync, LinkAudio sinks and sources. |
 
 *Tactus* is the early-music term for the shared steady beat an ensemble
-keeps — a tempo-sync library name with no Link branding. Neither crate is
-published yet; the names are reserved proposals pending confirmation.
+keeps — a tempo-sync library name with no Link branding. The names are
+confirmed; first publication to crates.io is pending (both verified
+packageable with `cargo package --workspace`).
 
 ## Status
 
