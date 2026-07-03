@@ -118,6 +118,11 @@ pub struct Source {
     pub last_request_at: i64,
     pub last_buffer_at: i64,
     pub inbox: VecDeque<ReceivedChunk>,
+    /// Next chunk sequence number expected; `None` until the first chunk
+    /// arrives (a mid-stream subscription is not counted as loss).
+    pub next_seq_expected: Option<u64>,
+    /// Chunks detected lost from sequence gaps (chapter 03 §5.8).
+    pub lost_chunks: u64,
 }
 
 /// One delivered chunk (chapter 03 §7.4): frames plus their position on the
@@ -278,6 +283,18 @@ fn deliver(source: &mut Source, buf: &wire::AudioBuffer, timeline: &Timeline, no
     let mut at = 0usize;
     // Each chunk is delivered as a separate unit (chapter 03 §7.4).
     for chunk in &buf.chunks {
+        // Loss from sequence gaps (chapter 03 §5.3): the data plane is
+        // open-loop and nothing reports loss to the sender, so the receiver
+        // SHOULD surface it to the application (chapter 03 §5.8).
+        match source.next_seq_expected {
+            None => source.next_seq_expected = Some(chunk.seq + 1),
+            Some(expected) if chunk.seq >= expected => {
+                source.lost_chunks += chunk.seq - expected;
+                source.next_seq_expected = Some(chunk.seq + 1);
+            }
+            // A reordered chunk arriving after its gap was counted.
+            Some(_) => source.lost_chunks = source.lost_chunks.saturating_sub(1),
+        }
         let end = (at + chunk.num_frames as usize * ch).min(samples.len());
         source.inbox.push_back(ReceivedChunk {
             samples: samples[at..end].to_vec(),
@@ -481,20 +498,95 @@ pub fn write_sink(
         return;
     }
 
-    // Drain full datagrams: up to the sample-byte cap each (chapter 03 §5.6).
-    let frames_cap = wire::SAMPLE_BYTE_CAP / (2 * ch);
-    let mut datagrams: Vec<Vec<u8>> = Vec::new();
-    loop {
-        let pending: usize = sink.segments.iter().map(|s| s.samples.len() / ch).sum();
-        if pending < frames_cap {
-            break;
+    // Drain full datagrams (chapter 03 §5.6, §3.1).
+    let fill = eng.config.fill_audio_datagrams;
+    let datagrams: Vec<Vec<u8>> =
+        drain_datagrams(sink, channel, session, sample_rate, num_channels, fill)
+            .into_iter()
+            .map(|buffer| wire::encode(&wire::Frame::new(node, wire::Message::AudioBuffer(buffer))))
+            .collect();
+
+    // One unicast copy per unexpired requester, over its best path
+    // (chapter 03 §5.7).
+    let requesters: Vec<NodeId> = sink.requesters.keys().copied().collect();
+    for peer in requesters {
+        if let Some((gw, ep)) = best_path(peers, &audio.paths, peer) {
+            for bytes in &datagrams {
+                send_via(gateways, gw, bytes, ep);
+            }
         }
+    }
+}
+
+/// Pack full datagrams from a sink's pending segments and consume the
+/// packed material; a partial datagram's worth stays pending.
+///
+/// Default sizing matches the reference sender: a flat 502-byte sample
+/// budget per datagram, chunk records uncounted (chapter 03 §5.6). Fill
+/// mode packs each datagram toward the 1176-byte SHOULD payload budget
+/// (chapter 03 §3.1) instead, counting real chunk-record overhead and
+/// keeping every chunk within the 512-frame bound that v1 endpoints impose
+/// (chapter 03 §5.9 [N]) — the efficient corner of v1 the reference sender
+/// leaves unused (≈ 2.2× fewer datagrams for the same audio).
+fn drain_datagrams(
+    sink: &mut Sink,
+    channel: ChannelId,
+    session: SessionId,
+    sample_rate: u32,
+    num_channels: u8,
+    fill: bool,
+) -> Vec<wire::AudioBuffer> {
+    let ch = num_channels.max(1) as usize;
+    let frame_bytes = 2 * ch;
+    // The byte region the planner spends: sample bytes alone (reference
+    // sizing) or chunk records + sample bytes (fill sizing).
+    let (budget, record_cost, chunk_cap) = if fill {
+        (
+            wire::MAX_PAYLOAD - wire::AUDIO_FIXED_OVERHEAD,
+            wire::CHUNK_RECORD_SIZE,
+            wire::V1_MAX_CHUNK_FRAMES,
+        )
+    } else {
+        (wire::SAMPLE_BYTE_CAP, 0, usize::MAX)
+    };
+
+    let mut out = Vec::new();
+    loop {
+        // Plan one datagram: frames per chunk, drawn in order from the
+        // leading segments; a segment longer than the chunk cap splits.
+        let mut takes: Vec<usize> = Vec::new();
+        let mut left = budget;
+        let mut exhausted = false;
+        'plan: for seg in &sink.segments {
+            let mut seg_frames = seg.samples.len() / ch;
+            while seg_frames > 0 {
+                if left < record_cost + frame_bytes {
+                    exhausted = true;
+                    break 'plan;
+                }
+                let take = seg_frames
+                    .min(chunk_cap)
+                    .min((left - record_cost) / frame_bytes);
+                takes.push(take);
+                left -= record_cost + take * frame_bytes;
+                seg_frames -= take;
+            }
+        }
+        // Emit only full datagrams; a partial one waits for more material.
+        if takes.is_empty() || (!exhausted && left >= record_cost + frame_bytes) {
+            return out;
+        }
+
+        // Consume the plan.
         let mut chunks = Vec::new();
-        let mut data: Vec<i16> = Vec::with_capacity(frames_cap * ch);
-        let mut left = frames_cap;
-        while left > 0 {
-            let seg = sink.segments.front_mut().expect("pending frames");
-            let take = (seg.samples.len() / ch).min(left);
+        let mut data: Vec<i16> = Vec::new();
+        for take in takes {
+            // The planner skips sub-frame residue (a segment shorter than
+            // one frame); drop it here so the two stay aligned.
+            while sink.segments.front().is_some_and(|s| s.samples.len() < ch) {
+                sink.segments.pop_front();
+            }
+            let seg = sink.segments.front_mut().expect("planned frames");
             chunks.push(wire::Chunk {
                 seq: sink.next_seq,
                 num_frames: take as u16,
@@ -507,9 +599,8 @@ pub fn write_sink(
             if seg.samples.is_empty() {
                 sink.segments.pop_front();
             }
-            left -= take;
         }
-        let buffer = wire::AudioBuffer {
+        out.push(wire::AudioBuffer {
             channel,
             session,
             chunks,
@@ -517,22 +608,7 @@ pub fn write_sink(
             sample_rate,
             num_channels,
             sample_data: wire::AudioBuffer::encode_samples(&data),
-        };
-        datagrams.push(wire::encode(&wire::Frame::new(
-            node,
-            wire::Message::AudioBuffer(buffer),
-        )));
-    }
-
-    // One unicast copy per unexpired requester, over its best path
-    // (chapter 03 §5.7).
-    let requesters: Vec<NodeId> = sink.requesters.keys().copied().collect();
-    for peer in requesters {
-        if let Some((gw, ep)) = best_path(peers, &audio.paths, peer) {
-            for bytes in &datagrams {
-                send_via(gateways, gw, bytes, ep);
-            }
-        }
+        });
     }
 }
 
@@ -698,6 +774,8 @@ pub fn subscribe(eng: &Engine, st: &mut State, channel: ChannelId, quantum: i64)
         last_request_at: now,
         last_buffer_at: i64::MIN / 2,
         inbox: VecDeque::new(),
+        next_seq_expected: None,
+        lost_chunks: 0,
     });
     send_request(node, peers, gateways, audio, channel, false);
     eng.notify();
@@ -722,5 +800,166 @@ pub fn unsubscribe(_eng: &Engine, st: &mut State, channel: ChannelId) {
     let Some(audio) = audio.as_mut() else { return };
     if audio.sources.remove(&channel).is_some() {
         send_request(node, peers, gateways, audio, channel, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tactus_wire::types::Id;
+
+    /// §5.9 [N]: a receiver MUST bound its decode-to-render copy by its own
+    /// capacity rather than overrun. This receiver stages into the decoded
+    /// vector itself (no fixed scratch buffer), so a single chunk above the
+    /// reference's 512-frame endpoint limit is delivered intact.
+    #[test]
+    fn deliver_stages_chunk_above_512_frames_intact() {
+        let samples: Vec<i16> = (0..550).map(|i| (i * 7 - 500) as i16).collect();
+        let buf = wire::AudioBuffer {
+            channel: Id(*b"CHANNEL1"),
+            session: Id(*b"SESSIONX"),
+            chunks: vec![wire::Chunk {
+                seq: 3,
+                num_frames: 550,
+                begin_beats: 4_000_000,
+                tempo: 500_000,
+            }],
+            codec: wire::CODEC_PCM_I16,
+            sample_rate: 48_000,
+            num_channels: 1,
+            sample_data: wire::AudioBuffer::encode_samples(&samples),
+        };
+        let timeline = Timeline {
+            tempo: 500_000,
+            beat_origin: 0,
+            time_origin: 0,
+        };
+        let mut source = test_source();
+        deliver(&mut source, &buf, &timeline, 123);
+        assert_eq!(source.inbox.len(), 1);
+        let chunk = &source.inbox[0];
+        assert_eq!(chunk.samples, samples);
+        assert_eq!(chunk.seq, 3);
+        assert_eq!(source.last_buffer_at, 123);
+    }
+
+    fn test_source() -> Source {
+        Source {
+            quantum: 4_000_000,
+            last_request_at: 0,
+            last_buffer_at: i64::MIN / 2,
+            inbox: VecDeque::new(),
+            next_seq_expected: None,
+            lost_chunks: 0,
+        }
+    }
+
+    fn seq_buffer(seqs: &[u64]) -> wire::AudioBuffer {
+        let frames = 4usize;
+        wire::AudioBuffer {
+            channel: Id(*b"CHANNEL1"),
+            session: Id(*b"SESSIONX"),
+            chunks: seqs
+                .iter()
+                .map(|&seq| wire::Chunk {
+                    seq,
+                    num_frames: frames as u16,
+                    begin_beats: 0,
+                    tempo: 500_000,
+                })
+                .collect(),
+            codec: wire::CODEC_PCM_I16,
+            sample_rate: 48_000,
+            num_channels: 1,
+            sample_data: wire::AudioBuffer::encode_samples(&vec![0; frames * seqs.len()]),
+        }
+    }
+
+    fn test_sink(frames: usize, ch: usize) -> Sink {
+        Sink {
+            id: Id(*b"CHANNEL1"),
+            name: b"sink".to_vec(),
+            requesters: HashMap::new(),
+            next_seq: 1,
+            segments: VecDeque::from([Segment {
+                begin: 0,
+                tempo: 500_000,
+                samples: vec![0i16; frames * ch],
+            }]),
+            format: Some((48_000, ch as u8)),
+        }
+    }
+
+    fn drain(sink: &mut Sink, ch: u8, fill: bool) -> Vec<wire::AudioBuffer> {
+        drain_datagrams(sink, Id(*b"CHANNEL1"), Id(*b"SESSIONX"), 48_000, ch, fill)
+    }
+
+    fn encoded_len(buf: &wire::AudioBuffer) -> usize {
+        wire::encode(&wire::Frame::new(
+            Id(*b"NODEID01"),
+            wire::Message::AudioBuffer(buf.clone()),
+        ))
+        .len()
+    }
+
+    /// Reference sizing (chapter 03 §5.6): 251-frame mono datagrams at the
+    /// 502-byte sample cap (576 bytes on the wire [W]); the partial
+    /// remainder stays pending.
+    #[test]
+    fn drain_reference_sizing_matches_the_reference_wire_shape() {
+        let mut sink = test_sink(600, 1);
+        let bufs = drain(&mut sink, 1, false);
+        assert_eq!(bufs.len(), 2);
+        for buf in &bufs {
+            assert_eq!(buf.total_frames(), 251);
+            assert_eq!(encoded_len(buf), 576);
+        }
+        let pending: usize = sink.segments.iter().map(|s| s.samples.len()).sum();
+        assert_eq!(pending, 600 - 2 * 251);
+    }
+
+    /// Fill sizing: each datagram packs to the 1176-byte SHOULD payload
+    /// budget (chapter 03 §3.1) with every chunk within the v1 512-frame
+    /// receive bound (chapter 03 §5.9 [N]) — 548 mono frames per datagram
+    /// as a 512 + 36 chunk pair, 2.2× the reference's 251.
+    #[test]
+    fn drain_fill_sizing_packs_the_datagram_within_v1_bounds() {
+        let mut sink = test_sink(1200, 1);
+        let bufs = drain(&mut sink, 1, true);
+        assert_eq!(bufs.len(), 2);
+        let mut expected_seq = 1;
+        for buf in &bufs {
+            assert_eq!(buf.total_frames(), 548);
+            assert_eq!(encoded_len(buf), 20 + wire::MAX_PAYLOAD);
+            for c in &buf.chunks {
+                assert!((c.num_frames as usize) <= wire::V1_MAX_CHUNK_FRAMES);
+                assert_eq!(c.seq, expected_seq);
+                expected_seq += 1;
+            }
+        }
+        let pending: usize = sink.segments.iter().map(|s| s.samples.len()).sum();
+        assert_eq!(pending, 1200 - 2 * 548);
+    }
+
+    /// §5.8: the receiver surfaces loss from sequence gaps; the first seen
+    /// chunk seeds the counter (mid-stream subscription is not loss), and a
+    /// reordered late arrival takes its gap back off the count.
+    #[test]
+    fn sequence_gaps_are_surfaced_as_loss() {
+        let timeline = Timeline {
+            tempo: 500_000,
+            beat_origin: 0,
+            time_origin: 0,
+        };
+        let mut source = test_source();
+        deliver(&mut source, &seq_buffer(&[5]), &timeline, 0);
+        assert_eq!(source.lost_chunks, 0, "mid-stream start is not loss");
+        deliver(&mut source, &seq_buffer(&[6, 7]), &timeline, 1);
+        assert_eq!(source.lost_chunks, 0);
+        deliver(&mut source, &seq_buffer(&[10]), &timeline, 2);
+        assert_eq!(source.lost_chunks, 2, "chunks 8 and 9 missing");
+        deliver(&mut source, &seq_buffer(&[8]), &timeline, 3);
+        assert_eq!(source.lost_chunks, 1, "8 arrived late, only 9 missing");
+        assert_eq!(source.inbox.len(), 5);
     }
 }

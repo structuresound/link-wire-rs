@@ -28,7 +28,7 @@ packageable with `cargo package --workspace`).
 
 Implementation work happens in sessions and environments that have never had
 access to the reference source (see [docs/CLEAN-TEAM.md](docs/CLEAN-TEAM.md)),
-built against spec release 0.4.0. The conformance harness (which builds and
+built against spec release 0.4.3. The conformance harness (which builds and
 runs upstream reference binaries as interop test peers — use of GPL software,
 not distribution) integrates via CI caches only. The project's definition of
 done, by milestone:

@@ -127,6 +127,82 @@ fn audio_channel_lifecycle() {
     assert!(!alice.is_audio_enabled());
 }
 
+/// Opt-in fill mode ([`tactus::Config::fill_audio_datagrams`]): packed
+/// datagrams carry chunks up to the 512-frame v1 receive bound
+/// (chapter 03 §5.9 [N]) and reassemble into the same contiguous stream on
+/// a subscriber, with the §5.8 loss counter staying at zero.
+#[test]
+fn fill_mode_streams_packed_datagrams() {
+    let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+
+    let alice = Link::with_config(
+        120.0,
+        tactus::Config {
+            fill_audio_datagrams: true,
+            ..tactus::Config::default()
+        },
+    );
+    alice.enable();
+    std::thread::sleep(Duration::from_millis(700));
+    let bob = Link::new(120.0);
+    bob.enable();
+    wait_for("session", Duration::from_secs(10), || {
+        alice.num_peers() == 1 && alice.session_id() == bob.session_id()
+    });
+    alice.enable_audio("Alice");
+    bob.enable_audio("Bob");
+    let channel = alice.publish_channel("Packed").unwrap();
+    wait_for("channel visible to Bob", Duration::from_secs(10), || {
+        bob.visible_channels().iter().any(|c| c.id == channel)
+    });
+    bob.subscribe_channel(channel, 4.0);
+    wait_for("Alice sees the request", Duration::from_secs(5), || {
+        alice.has_requesters(channel)
+    });
+
+    let sample_rate = 48_000u32;
+    let mut sent: Vec<i16> = Vec::new();
+    let mut cursor_beat = alice.beat_at_time(alice.clock_micros(), 4.0);
+    let beats_per_chunk = |frames: f64| frames / sample_rate as f64 * (alice.tempo() / 60.0);
+    let mut value: i16 = 0;
+    for _ in 0..40 {
+        let chunk: Vec<i16> = (0..480)
+            .map(|_| {
+                value = value.wrapping_add(7);
+                value
+            })
+            .collect();
+        alice.write_channel(channel, &chunk, sample_rate, 1, cursor_beat, 4.0);
+        cursor_beat += beats_per_chunk(480.0);
+        sent.extend(chunk);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    wait_for("Bob is receiving", Duration::from_secs(5), || {
+        bob.is_receiving(channel)
+    });
+    let chunks = bob.poll_channel(channel);
+    assert!(!chunks.is_empty(), "no chunks delivered");
+
+    // Fill mode engaged: chunks reach — and never exceed — the 512-frame
+    // bound, versus the reference sender's 251.
+    assert!(chunks.iter().all(|c| c.samples.len() <= 512));
+    assert!(
+        chunks.iter().any(|c| c.samples.len() == 512),
+        "no 512-frame chunk seen; fill mode did not engage"
+    );
+
+    // Sample integrity: the received stream is a contiguous slice of the
+    // sent stream, exactly as in the default-sizing lifecycle test.
+    let received: Vec<i16> = chunks.iter().flat_map(|c| c.samples.clone()).collect();
+    sent.windows(received.len().min(64))
+        .position(|w| w == &received[..w.len()])
+        .expect("received samples are a slice of the sent stream");
+
+    // Loopback delivery is lossless; the §5.8 counter must agree.
+    assert_eq!(bob.channel_lost_chunks(channel), 0);
+}
+
 #[test]
 fn request_expiry_silences_sink() {
     let _net = NET.lock().unwrap_or_else(|e| e.into_inner());

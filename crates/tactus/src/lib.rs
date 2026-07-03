@@ -40,12 +40,20 @@ pub struct Config {
     /// Local interface addresses to run gateways on (chapter 00 §2). Each
     /// address gets its own discovery/measurement/audio sockets.
     pub gateways: Vec<Ipv4Addr>,
+    /// Pack audio datagrams toward the 1176-byte payload budget
+    /// (chapter 03 §3.1) instead of the reference sender's 502-byte sample
+    /// cap (§5.6) — ≈ 2.2× fewer datagrams for the same audio. Legal toward
+    /// any v1 peer: every chunk stays within the 512-frame receive bound of
+    /// reference endpoints (chapter 03 §5.9 [N]). Off by default so the
+    /// wire shape matches the reference sender exactly.
+    pub fill_audio_datagrams: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             gateways: vec![Ipv4Addr::LOCALHOST],
+            fill_audio_datagrams: false,
         }
     }
 }
@@ -297,6 +305,19 @@ impl Link {
     pub fn is_receiving(&self, id: [u8; 8]) -> bool {
         let st = self.eng.lock();
         audio::is_receiving(&st, wire::types::Id(id), self.eng.now())
+    }
+
+    /// Chunks detected lost on a subscription so far, from gaps in the
+    /// sender's per-channel sequence numbers (chapter 03 §5.3). The data
+    /// plane is open-loop — nothing reports loss back to the sender
+    /// (chapter 03 §5.8) — so this counter is how an application observes
+    /// stream health and reacts. Resets with the subscription.
+    pub fn channel_lost_chunks(&self, id: [u8; 8]) -> u64 {
+        let st = self.eng.lock();
+        st.audio
+            .as_ref()
+            .and_then(|a| a.sources.get(&wire::types::Id(id)))
+            .map_or(0, |s| s.lost_chunks)
     }
 
     /// True while at least one peer holds an unexpired request for the

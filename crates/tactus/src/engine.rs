@@ -413,6 +413,10 @@ impl Engine {
             let Some(m) = st.measurement.as_ref() else {
                 return;
             };
+            // Pong admission: we take the §4.2 [N] latitude to correlate
+            // pongs by the measured peer's endpoint — pings are only ever
+            // sent there, so this filters nothing but foreign traffic and
+            // avoids the reference's concurrent-measurement mutual abort.
             if m.task.gateway != gw_idx || m.task.target != src {
                 return;
             }
@@ -698,5 +702,54 @@ mod tests {
         assert_eq!(median_round(&mut s), 11); // median 10.5, rounded
         let mut s = vec![10.0, 12.0];
         assert_eq!(median_round(&mut s), 11);
+    }
+
+    /// §4.2: the 5-retry budget is cumulative over a measurement's lifetime.
+    /// A pong re-arms the 50 ms timer but never restores the budget, and the
+    /// first expiry after the budget is spent fails the measurement.
+    #[test]
+    fn pong_rearms_retry_timer_but_never_restores_budget() {
+        let eng = Engine::new(
+            120.0,
+            crate::Config {
+                gateways: vec![],
+                ..crate::Config::default()
+            },
+        );
+        let mut st = eng.lock();
+        st.enabled = true;
+        let sess = Id(*b"SESSIONX");
+        let target: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        st.measurement = Some(Measurement {
+            task: MeasureTask {
+                session: sess,
+                target,
+                gateway: 0,
+                purpose: Purpose::Join,
+            },
+            samples: Vec::new(),
+            timeouts: 3,
+            retry_deadline: 0,
+        });
+
+        // A valid pong from the measured endpoint re-arms the timer only.
+        let pong = sync::encode_pong(sess, 1, &[]);
+        eng.handle_measurement_datagram(&mut st, 0, target, &pong);
+        let m = st.measurement.as_ref().expect("measurement still running");
+        assert_eq!(m.timeouts, 3, "pong receipt must not restore the budget");
+        assert!(m.retry_deadline > 0, "pong receipt re-arms the timer");
+
+        // Two more expiries spend the budget (4, 5); the next one fails.
+        for spent in [4, 5] {
+            st.measurement.as_mut().unwrap().retry_deadline = 0;
+            eng.housekeeping_pass(&mut st);
+            assert_eq!(st.measurement.as_ref().unwrap().timeouts, spent);
+        }
+        st.measurement.as_mut().unwrap().retry_deadline = 0;
+        eng.housekeeping_pass(&mut st);
+        assert!(
+            st.measurement.is_none(),
+            "expiry after the 5-retry budget fails the measurement"
+        );
     }
 }
