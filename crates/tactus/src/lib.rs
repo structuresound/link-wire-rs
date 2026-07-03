@@ -34,6 +34,60 @@ pub struct VisibleChannel {
     pub id: [u8; 8],
 }
 
+/// A consistent view of the session, captured under a single lock
+/// acquisition by [`Link::capture_session`].
+///
+/// The individual getters ([`Link::tempo`], [`Link::beat_at_time`],
+/// [`Link::is_playing`], …) each take the peer's internal lock, so a
+/// sequence of them can straddle a timeline or session change and
+/// disagree with each other. Hosts with realtime audio threads should
+/// instead poll `capture_session` from a non-realtime thread and
+/// extrapolate on the audio thread with [`SessionSnapshot::beat_at`] /
+/// [`SessionSnapshot::phase_at`], which are pure arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionSnapshot {
+    /// Local time ([`Link::clock_micros`]) at which the snapshot was
+    /// captured.
+    pub at_micros: i64,
+    /// The quantum `beat` and `phase` were captured at.
+    pub quantum: f64,
+    /// Session tempo in bpm.
+    pub tempo_bpm: f64,
+    /// Application beat at `at_micros` for `quantum`.
+    pub beat: f64,
+    /// Phase of `beat` within `quantum`, in `[0, quantum)` (0 when
+    /// `quantum <= 0`).
+    pub phase: f64,
+    /// Transport state visible to the application.
+    pub is_playing: bool,
+    /// Whether this peer is currently enabled (participating).
+    pub enabled: bool,
+    /// Number of other peers in the current session.
+    pub num_peers: usize,
+    /// The current session identifier.
+    pub session_id: [u8; 8],
+}
+
+impl SessionSnapshot {
+    /// Extrapolate the application beat to local time `micros`.
+    ///
+    /// Exact for as long as the session timeline is unchanged after the
+    /// capture (the timeline is piecewise linear in time); after a tempo
+    /// or origin change a newer snapshot supersedes this one.
+    pub fn beat_at(&self, micros: i64) -> f64 {
+        self.beat + (micros - self.at_micros) as f64 * self.tempo_bpm / 60e6
+    }
+
+    /// Extrapolated phase within the captured quantum at local time
+    /// `micros`, in `[0, quantum)` (0 when `quantum <= 0`).
+    pub fn phase_at(&self, micros: i64) -> f64 {
+        if self.quantum <= 0.0 {
+            return 0.0;
+        }
+        self.beat_at(micros).rem_euclid(self.quantum)
+    }
+}
+
 /// Peer configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -88,19 +142,29 @@ impl Link {
 
     /// Number of other peers in the current session.
     pub fn num_peers(&self) -> usize {
+        count_peers(&self.eng.lock())
+    }
+
+    /// Capture tempo, beat, phase, transport, and membership in one lock
+    /// acquisition. See [`SessionSnapshot`] for why hosts driving a
+    /// realtime audio thread should prefer this over the individual
+    /// getters.
+    pub fn capture_session(&self, quantum: f64) -> SessionSnapshot {
         let st = self.eng.lock();
-        if !st.enabled {
-            return 0;
+        let now = self.eng.now();
+        let q = quantum_micro_beats(quantum);
+        let b = math::app_beat_at_ghost(&st.timeline, now + st.ghost_offset, q);
+        SessionSnapshot {
+            at_micros: now,
+            quantum,
+            tempo_bpm: math::tempo_to_bpm(st.timeline.tempo),
+            beat: b as f64 / 1e6,
+            phase: math::phase(b, q) as f64 / 1e6,
+            is_playing: st.app_playing,
+            enabled: st.enabled,
+            num_peers: count_peers(&st),
+            session_id: st.session.0,
         }
-        let mut nodes: Vec<_> = st
-            .peers
-            .iter()
-            .filter(|(_, e)| e.state.session == Some(st.session))
-            .map(|((n, _), _)| *n)
-            .collect();
-        nodes.sort();
-        nodes.dedup();
-        nodes.len()
     }
 
     /// Session tempo in bpm.
@@ -353,4 +417,20 @@ fn quantum_micro_beats(quantum: f64) -> i64 {
     } else {
         (quantum * 1e6).round() as i64
     }
+}
+
+/// Distinct nodes visible in the current session (0 while disabled).
+fn count_peers(st: &engine::State) -> usize {
+    if !st.enabled {
+        return 0;
+    }
+    let mut nodes: Vec<_> = st
+        .peers
+        .iter()
+        .filter(|(_, e)| e.state.session == Some(st.session))
+        .map(|((n, _), _)| *n)
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    nodes.len()
 }
