@@ -17,11 +17,10 @@ permissions:
 
 env:
   SPEC_REPO: structuresound/link-wire-spec
-  # The spec content this candidate targets: v0.4.0 plus the harness
-  # fixes on the spec repo's claude/hopeful-ride-u0k49i branch (closed-loop
-  # tempo driving). Move this pin to a release tag once one exists
-  # (link-wire-spec issue #4) and the branch is merged.
-  SPEC_REF: c3fa146823e284a2abc62eae59075c75d4e58f09
+  # The spec content this candidate targets: v0.4.3 (main merge commit;
+  # harness gains the SHAPE impairment hook, scenarios unchanged). Move
+  # this pin to a release tag once one exists (link-wire-spec issue #4).
+  SPEC_REF: d27abb9ad5f3135a51579b9231ed9f4aa176dd97
 
 jobs:
   conformance:

@@ -25,6 +25,13 @@ pub const REQUEST_PERIOD_MS: u64 = 5000;
 pub const CODEC_PCM_I16: u8 = 1;
 /// Wire size of one chunk record (chapter 03 §5.3).
 pub const CHUNK_RECORD_SIZE: usize = 26;
+/// Fixed non-chunk bytes of an AudioBuffer payload: channel + session +
+/// chunk count + codec + rate + channels + numBytes (chapter 03 §5.6).
+pub const AUDIO_FIXED_OVERHEAD: usize = 28;
+/// Per-chunk frame bound a sender MUST respect toward v1 peers — the
+/// reference endpoint stages each chunk in a fixed 512-sample buffer
+/// (chapter 03 §5.9 [N]).
+pub const V1_MAX_CHUNK_FRAMES: usize = 512;
 
 const TYPE_PEER_ANNOUNCEMENT: u8 = 1;
 const TYPE_CHANNEL_BYES: u8 = 2;
@@ -485,6 +492,48 @@ mod tests {
         let bytes = encode(&frame);
         // §5.6: single-chunk datagram at the 502-byte cap = 576 bytes total.
         assert_eq!(bytes.len(), 576);
+        assert_eq!(decode(&bytes).unwrap(), frame);
+    }
+
+    /// §5.9: the parse path has no 512-frame-per-chunk ceiling — it is
+    /// bounded only by the datagram. The 512 limit is a reference *endpoint*
+    /// behavior to interoperate against (never exceed it toward a v1 peer),
+    /// not a decode rule to reproduce.
+    #[test]
+    fn audio_buffer_accepts_chunks_above_512_frames() {
+        let samples: Vec<i16> = (0..550).map(|i| (i * 7 - 500) as i16).collect();
+        let jumbo = AudioBuffer {
+            chunks: vec![Chunk {
+                seq: 9,
+                num_frames: 550,
+                begin_beats: 0,
+                tempo: 500_000,
+            }],
+            sample_data: AudioBuffer::encode_samples(&samples),
+            ..test_buffer()
+        };
+        let frame = Frame::new(NODE, Message::AudioBuffer(jumbo));
+        let bytes = encode(&frame);
+        assert_eq!(bytes.len(), 1174);
+        assert_eq!(decode(&bytes).unwrap(), frame);
+
+        // The probed-safe shape toward v1 peers: a full 1200-byte datagram
+        // of two 275-frame chunks — 550 frames total, each chunk ≤ 512.
+        let packed = AudioBuffer {
+            chunks: (0..2)
+                .map(|i| Chunk {
+                    seq: 9 + i,
+                    num_frames: 275,
+                    begin_beats: i as i64 * 3_437_500,
+                    tempo: 500_000,
+                })
+                .collect(),
+            sample_data: AudioBuffer::encode_samples(&samples),
+            ..test_buffer()
+        };
+        let frame = Frame::new(NODE, Message::AudioBuffer(packed));
+        let bytes = encode(&frame);
+        assert_eq!(bytes.len(), MAX_MESSAGE_SIZE);
         assert_eq!(decode(&bytes).unwrap(), frame);
     }
 
