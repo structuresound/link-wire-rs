@@ -46,12 +46,41 @@ impl Gateway {
     pub fn open(index: usize, addr: Ipv4Addr) -> io::Result<Gateway> {
         let group = discovery::MULTICAST_V4;
 
-        // Multicast receive socket: wildcard bind with address reuse so
-        // several peers on one host share the port (chapter 01 §2), group
+        // Multicast receive socket: wildcard bind with port reuse so several
+        // peers on one host share the discovery port (chapter 01 §2), group
         // joined on this gateway's interface, delivery restricted to groups
         // joined on this socket where the platform supports it.
+        //
+        // Both reuse options are required, and which one does the work depends
+        // on the platform. Linux honours SO_REUSEADDR alone for a wildcard UDP
+        // bind; macOS and the BSDs do NOT — there SO_REUSEADDR only relaxes the
+        // TCP TIME_WAIT rule, and a second wildcard bind on the same UDP port
+        // fails with EADDRINUSE unless every socket sharing it also sets
+        // SO_REUSEPORT. So a process opening a second gateway (two LinkRuntimes
+        // in one host, or a peer alongside another app) used to fail on macOS
+        // and work on Linux. Set both; SO_REUSEPORT must be set before bind.
+        //
+        // Setting SO_REUSEPORT on Linux is safe here even though it enables
+        // load balancing for unicast: nothing addresses this port by unicast.
+        // Responses go to the sender's ephemeral `unicast` socket (engine.rs
+        // replies to the datagram's source), and multicast delivery still fans
+        // out to every socket joined to the group.
         let mcast = base_socket()?;
         mcast.set_reuse_address(true)?;
+        // socket2 exposes set_reuse_port on unix minus the targets below; the
+        // exclusion list is the union across socket2 0.6.x so a patch bump
+        // cannot break the build.
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "solaris",
+                target_os = "illumos",
+                target_os = "cygwin",
+                target_os = "nuttx",
+                target_os = "wasi"
+            ))
+        ))]
+        mcast.set_reuse_port(true)?;
         mcast.bind(
             &SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, discovery::PORT)).into(),
         )?;
