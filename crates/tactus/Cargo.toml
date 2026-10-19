@@ -13,3 +13,9 @@ rust-version.workspace = true
 tactus-wire.workspace = true
 socket2.workspace = true
 getrandom.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

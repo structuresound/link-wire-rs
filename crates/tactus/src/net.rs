@@ -17,7 +17,11 @@ use tactus_wire::discovery;
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct Gateway {
-    pub index: usize,
+    /// Stable identity for the gateway's lifetime; keys per-gateway peer,
+    /// channel and path state. Never reused after the gateway closes.
+    pub id: usize,
+    /// The local interface address this gateway runs on.
+    pub addr: Ipv4Addr,
     /// Bound to wildcard:20808, joined to the discovery group on this
     /// gateway's interface (chapter 01 §2 socket 1).
     pub mcast_recv: UdpSocket,
@@ -43,7 +47,7 @@ fn ephemeral(addr: Ipv4Addr) -> io::Result<UdpSocket> {
 }
 
 impl Gateway {
-    pub fn open(index: usize, addr: Ipv4Addr) -> io::Result<Gateway> {
+    pub fn open(id: usize, addr: Ipv4Addr) -> io::Result<Gateway> {
         let group = discovery::MULTICAST_V4;
 
         // Multicast receive socket: wildcard bind with port reuse so several
@@ -97,7 +101,8 @@ impl Gateway {
         unicast.set_multicast_loop_v4(addr.is_loopback())?;
 
         Ok(Gateway {
-            index,
+            id,
+            addr,
             mcast_recv: mcast.into(),
             unicast: unicast.into(),
             measurement: ephemeral(addr)?,

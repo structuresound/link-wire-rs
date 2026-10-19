@@ -47,8 +47,10 @@ name = "tactus"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "libc",
  "socket2",
  "tactus-wire",
+ "windows-sys",
 ]
 
 [[package]]

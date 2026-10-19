@@ -3,14 +3,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use tactus_wire::audio as wire;
 use tactus_wire::types::{ChannelId, NodeId, SessionId, Timeline};
 
-use crate::engine::{random_id, Engine, PeerEntry, State};
+use crate::engine::{random_id, Engine, GatewayMap, PeerEntry, State};
 use crate::math;
-use crate::net::Gateway;
 
 /// A source is "receiving" while buffers arrived within this window.
 const RECEIVING_WINDOW: i64 = 1_000_000;
@@ -42,7 +40,7 @@ pub struct AudioState {
 }
 
 impl AudioState {
-    fn new(peer_name: &str) -> AudioState {
+    pub(crate) fn new(peer_name: &str) -> AudioState {
         let mut name = peer_name.as_bytes().to_vec();
         name.truncate(wire::MAX_NAME); // sender-side cap (chapter 03 §8)
         AudioState {
@@ -172,8 +170,8 @@ fn best_path(peers: &Peers, paths: &Paths, node: NodeId) -> Option<(usize, Socke
         })
 }
 
-fn send_via(gateways: &[Arc<Gateway>], gw: usize, bytes: &[u8], dst: SocketAddr) {
-    if let Some(g) = gateways.get(gw) {
+fn send_via(gateways: &GatewayMap, gw: usize, bytes: &[u8], dst: SocketAddr) {
+    if let Some(g) = gateways.get(&gw) {
         let _ = g.audio.send_to(bytes, dst);
     }
 }
@@ -379,7 +377,7 @@ fn build_announcement_round(
 fn send_request(
     node: NodeId,
     peers: &Peers,
-    gateways: &[Arc<Gateway>],
+    gateways: &GatewayMap,
     audio: &AudioState,
     channel: ChannelId,
     stop: bool,
@@ -410,7 +408,7 @@ fn send_byes(
     node: NodeId,
     session: SessionId,
     peers: &Peers,
-    gateways: &[Arc<Gateway>],
+    gateways: &GatewayMap,
     channels: &[ChannelId],
 ) {
     if channels.is_empty() {
@@ -619,6 +617,15 @@ pub fn peer_left(_eng: &Engine, st: &mut State, node: NodeId) {
         // Channels of a departed publisher disappear (chapter 03 §7.3).
         audio.known.retain(|_, kc| kc.peer != node);
         audio.paths.retain(|(n, _), _| *n != node);
+    }
+}
+
+/// A gateway closed locally: its channel entries go (chapter 03 §7.3), and
+/// so do send paths through it.
+pub fn gateway_closed(st: &mut State, gw: usize) {
+    if let Some(audio) = st.audio.as_mut() {
+        audio.known.retain(|(_, g), _| *g != gw);
+        audio.paths.retain(|(_, g), _| *g != gw);
     }
 }
 

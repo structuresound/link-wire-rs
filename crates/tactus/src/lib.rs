@@ -8,12 +8,18 @@
 //! let beat = link.beat_at_time(link.clock_micros(), 4.0);
 //! ```
 //!
-//! Current scope: IPv4 gateways, loopback by default (configure others via
-//! [`Config::gateways`]); interface enumeration and IPv6 link-local gateways
-//! are not implemented yet.
+//! Current scope: IPv4 gateways. By default ([`Gateways::Auto`]) the peer
+//! runs a gateway on loopback and on every IPv4 interface that is up,
+//! multicast-capable and not point-to-point, and rescans every 5 s to open
+//! and close gateways as interfaces come and go (chapter 01 §2) — LAN peers
+//! are found with no host configuration. [`Gateways::Explicit`] pins an
+//! exact address list instead. IPv6 link-local gateways are not implemented
+//! yet. Pending link-wire-spec#9: a gateway closed by a rescan
+//! sends no ByeBye (remote peers age it out by ttl, chapter 01 §4.3, §7).
 
 mod audio;
 mod engine;
+mod iface;
 pub mod math;
 mod net;
 mod runtime;
@@ -88,12 +94,44 @@ impl SessionSnapshot {
     }
 }
 
+/// Which local addresses the peer runs gateways on (chapter 00 §2: a
+/// gateway is one local IP address).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Gateways {
+    /// Follow the host's interfaces (the default). Gateways run on
+    /// `127.0.0.1` — always, so peers on the same host find each other
+    /// (chapter 01 §2) — and on every IPv4 address whose interface is up,
+    /// multicast-capable and not point-to-point. Interfaces are rescanned
+    /// every 5 s while enabled (chapter 01 §2, §8); a new address opens a
+    /// gateway that announces immediately (§4.1), a vanished one closes its
+    /// gateway and forgets the peers and channels learned through it
+    /// (chapter 01 §7, chapter 03 §7.3).
+    ///
+    /// Enumeration uses `getifaddrs` on unix (on Android: API level 24+)
+    /// and `GetAdaptersAddresses` on Windows. Where neither exists, or a
+    /// scan fails, the current gateways are kept (initially loopback only).
+    #[default]
+    Auto,
+    /// Exactly these addresses, opened on enable and never rescanned. An
+    /// empty list runs no gateways. Include `127.0.0.1` to keep same-host
+    /// discovery.
+    Explicit(Vec<Ipv4Addr>),
+}
+
+impl From<Vec<Ipv4Addr>> for Gateways {
+    fn from(addrs: Vec<Ipv4Addr>) -> Self {
+        Gateways::Explicit(addrs)
+    }
+}
+
 /// Peer configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     /// Local interface addresses to run gateways on (chapter 00 §2). Each
-    /// address gets its own discovery/measurement/audio sockets.
-    pub gateways: Vec<Ipv4Addr>,
+    /// address gets its own discovery/measurement/audio sockets. Defaults
+    /// to [`Gateways::Auto`]; pass [`Gateways::Explicit`] (or a
+    /// `Vec<Ipv4Addr>` via `.into()`) to pin the list.
+    pub gateways: Gateways,
     /// Pack audio datagrams toward the 1176-byte payload budget
     /// (chapter 03 §3.1) instead of the reference sender's 502-byte sample
     /// cap (§5.6) — ≈ 2.2× fewer datagrams for the same audio. Legal toward
@@ -101,15 +139,6 @@ pub struct Config {
     /// reference endpoints (chapter 03 §5.9 [N]). Off by default so the
     /// wire shape matches the reference sender exactly.
     pub fill_audio_datagrams: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            gateways: vec![Ipv4Addr::LOCALHOST],
-            fill_audio_datagrams: false,
-        }
-    }
 }
 
 /// A session peer. Starts **disabled**; call [`Link::enable`] to join the

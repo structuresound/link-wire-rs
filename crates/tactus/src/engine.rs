@@ -3,7 +3,7 @@
 //! (chapter 02). All state lives behind one mutex; receiver threads and the
 //! housekeeping thread call into the handlers here.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,6 +13,7 @@ use tactus_wire::discovery::{self, PeerState};
 use tactus_wire::sync;
 use tactus_wire::types::{Id, NodeId, SessionId, StartStopState, Timeline};
 
+use crate::iface::{InterfaceSource, SystemInterfaces};
 use crate::math;
 use crate::net::Gateway;
 use crate::Config;
@@ -31,6 +32,11 @@ pub const MIN_BROADCAST_SPACING: i64 = 50_000;
 pub const MEASUREMENT_RETRY: i64 = 50_000;
 /// Timer-driven retries before a measurement fails (chapter 02 §4.2).
 pub const MAX_MEASUREMENT_RETRIES: u32 = 5;
+/// Interface rescan period (chapter 01 §2, §8).
+pub const RESCAN_PERIOD: i64 = 5_000_000;
+
+/// Open gateways by stable id ([`Gateway::id`]).
+pub type GatewayMap = BTreeMap<usize, Arc<Gateway>>;
 
 pub fn random_id() -> Id {
     let mut b = [0u8; 8];
@@ -84,7 +90,10 @@ pub struct State {
     /// What the application sees as the transport state.
     pub app_playing: bool,
     pub sst_sync: bool,
-    pub gateways: Vec<Arc<Gateway>>,
+    pub gateways: GatewayMap,
+    /// Id for the next gateway opened; ids are never reused, so state keyed
+    /// by a closed gateway can never alias a newer one.
+    pub next_gateway_id: usize,
     pub peers: HashMap<(NodeId, usize), PeerEntry>,
     /// True once a member of the current session has been seen; the
     /// found-fresh-session reset (chapter 02 §7.3) fires only on the
@@ -112,6 +121,8 @@ pub struct Engine {
     pub wake: Condvar,
     pub shutdown: AtomicBool,
     pub config: Config,
+    /// Interface enumeration for [`crate::Gateways::Auto`].
+    pub interfaces: Box<dyn InterfaceSource>,
     anchor: Instant,
 }
 
@@ -133,7 +144,8 @@ impl Engine {
                 held_stst: StartStopState::default(),
                 app_playing: false,
                 sst_sync: false,
-                gateways: Vec::new(),
+                gateways: GatewayMap::new(),
+                next_gateway_id: 0,
                 peers: HashMap::new(),
                 session_member_seen: false,
                 foreign_timelines: HashMap::new(),
@@ -149,6 +161,7 @@ impl Engine {
             wake: Condvar::new(),
             shutdown: AtomicBool::new(false),
             config,
+            interfaces: Box::new(SystemInterfaces),
             anchor: Instant::now(),
         }
     }
@@ -179,9 +192,16 @@ impl Engine {
         }
     }
 
+    /// Multicast an Alive on one gateway only, outside the periodic round:
+    /// a gateway opened by a rescan announces immediately (chapter 01 §4.1).
+    pub fn send_alive_on(&self, st: &State, gw: &Gateway) {
+        let frame = discovery::Frame::alive(st.node, self.build_state(st, gw));
+        gw.send_multicast(&discovery::encode(&frame));
+    }
+
     /// Multicast an Alive on every gateway; resets the periodic timer.
     pub fn send_alive(&self, st: &mut State, now: i64) {
-        for gw in &st.gateways {
+        for gw in st.gateways.values() {
             let state = self.build_state(st, gw);
             let frame = discovery::Frame::alive(st.node, state);
             gw.send_multicast(&discovery::encode(&frame));
@@ -228,7 +248,7 @@ impl Engine {
         // Respond to an Alive before processing its payload, whether or not
         // the payload parses (chapter 01 §4.2).
         if header.is_alive() {
-            if let Some(gw) = st.gateways.get(gw_idx).cloned() {
+            if let Some(gw) = st.gateways.get(&gw_idx).cloned() {
                 let state = self.build_state(st, &gw);
                 let resp = discovery::Frame::response(st.node, state);
                 gw.send_unicast(&discovery::encode(&resp), src);
@@ -363,7 +383,7 @@ impl Engine {
         let Some(task) = st.pending.pop_front() else {
             return;
         };
-        let Some(gw) = st.gateways.get(task.gateway) else {
+        let Some(gw) = st.gateways.get(&task.gateway) else {
             return;
         };
         let now = self.now();
@@ -399,7 +419,7 @@ impl Engine {
                 }
                 let ghost = self.now() + st.ghost_offset;
                 let pong = sync::encode_pong(st.session, ghost, &ping.payload);
-                if let Some(gw) = st.gateways.get(gw_idx) {
+                if let Some(gw) = st.gateways.get(&gw_idx) {
                     let _ = gw.measurement.send_to(&pong, src);
                 }
             }
@@ -449,7 +469,7 @@ impl Engine {
             // (chapter 02 §4.2).
             let (gateway, target) = (m.task.gateway, m.task.target);
             m.retry_deadline = now + MEASUREMENT_RETRY;
-            if let Some(gw) = st.gateways.get(gateway) {
+            if let Some(gw) = st.gateways.get(&gateway) {
                 let _ = gw
                     .measurement
                     .send_to(&sync::encode_ping(now, Some(gt)), target);
@@ -541,6 +561,34 @@ impl Engine {
         self.schedule_broadcast(st);
     }
 
+    /// Close gateway `id` locally. Its peer entries are removed (chapter 01
+    /// §7) and so are its channel entries (chapter 03 §7.3); a peer whose
+    /// last entry went with it has left, and losing the last session member
+    /// this way founds a fresh session like any other loss (chapter 02
+    /// §7.3). Queued measurements through it are dropped; one in flight
+    /// runs into its retry budget (chapter 02 §4.2). No ByeBye is sent —
+    /// the spec names ByeBye only for exit and disable (chapter 01 §4.3);
+    /// pending link-wire-spec#9.
+    pub fn close_gateway(&self, st: &mut State, id: usize) {
+        st.gateways.remove(&id);
+        let mut lost = Vec::new();
+        st.peers.retain(|(n, g), _| {
+            if *g == id {
+                lost.push(*n);
+            }
+            *g != id
+        });
+        st.pending.retain(|t| t.gateway != id);
+        crate::audio::gateway_closed(st, id);
+        for node in lost {
+            if !st.peers.keys().any(|(n, _)| *n == node) {
+                crate::audio::peer_left(self, st, node);
+            }
+        }
+        self.check_session_loss(st);
+        self.notify();
+    }
+
     pub fn check_session_loss(&self, st: &mut State) {
         if !st.session_member_seen {
             return;
@@ -614,7 +662,7 @@ impl Engine {
                     m.timeouts += 1;
                     m.retry_deadline = now + MEASUREMENT_RETRY;
                     let (gateway, target) = (m.task.gateway, m.task.target);
-                    if let Some(gw) = st.gateways.get(gateway) {
+                    if let Some(gw) = st.gateways.get(&gateway) {
                         // Fresh ping without _pgt (chapter 02 §4.2).
                         let _ = gw
                             .measurement
@@ -712,7 +760,7 @@ mod tests {
         let eng = Engine::new(
             120.0,
             crate::Config {
-                gateways: vec![],
+                gateways: crate::Gateways::Explicit(vec![]),
                 ..crate::Config::default()
             },
         );
@@ -751,5 +799,68 @@ mod tests {
             st.measurement.is_none(),
             "expiry after the 5-retry budget fails the measurement"
         );
+    }
+
+    fn member(session: SessionId) -> PeerEntry {
+        PeerEntry {
+            state: PeerState {
+                session: Some(session),
+                ..PeerState::default()
+            },
+            deadline: i64::MAX,
+        }
+    }
+
+    /// A gateway closed by a rescan takes its peer and channel entries with
+    /// it (chapter 01 §7, chapter 03 §7.3); a peer still reachable on
+    /// another gateway stays; losing the last session member founds a
+    /// fresh session (chapter 02 §7.3). No sockets involved.
+    #[test]
+    fn closing_a_gateway_forgets_what_was_learned_through_it() {
+        let eng = Engine::new(
+            120.0,
+            crate::Config {
+                gateways: crate::Gateways::Explicit(vec![]),
+                ..crate::Config::default()
+            },
+        );
+        let mut st = eng.lock();
+        st.enabled = true;
+        let sess = Id(*b"JOINEDSS");
+        st.session = sess;
+        st.session_member_seen = true;
+        let (a, b) = (Id(*b"PEER-AAA"), Id(*b"PEER-BBB"));
+        // `a` is reachable on gateways 0 and 1, `b` only on 1.
+        st.peers.insert((a, 0), member(sess));
+        st.peers.insert((a, 1), member(sess));
+        st.peers.insert((b, 1), member(sess));
+        st.audio = Some(crate::audio::AudioState::new("me"));
+        let chan = Id(*b"CHANNEL1");
+        for gw in [0, 1] {
+            st.audio.as_mut().unwrap().known.insert(
+                (chan, gw),
+                crate::audio::KnownChannel {
+                    peer: a,
+                    peer_name: b"a".to_vec(),
+                    name: b"ch".to_vec(),
+                    deadline: i64::MAX,
+                },
+            );
+        }
+        let node = st.node;
+
+        eng.close_gateway(&mut st, 1);
+        let mut left: Vec<_> = st.peers.keys().copied().collect();
+        left.sort();
+        assert_eq!(left, vec![(a, 0)], "only gateway 0's entry survives");
+        let known: Vec<_> = st.audio.as_ref().unwrap().known.keys().copied().collect();
+        assert_eq!(known, vec![(chan, 0)], "channel entries are per gateway");
+        assert_eq!((st.session, st.node), (sess, node), "a member remains");
+
+        eng.close_gateway(&mut st, 0);
+        assert!(st.peers.is_empty());
+        assert!(st.audio.as_ref().unwrap().known.is_empty());
+        assert_ne!(st.node, node, "last member lost: fresh NodeId");
+        assert_eq!(st.session, st.node, "and a fresh session");
     }
 }
