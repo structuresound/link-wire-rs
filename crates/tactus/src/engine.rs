@@ -561,16 +561,25 @@ impl Engine {
         self.schedule_broadcast(st);
     }
 
-    /// Close gateway `id` locally. Its peer entries are removed (chapter 01
-    /// §7) and so are its channel entries (chapter 03 §7.3); a peer whose
-    /// last entry went with it has left, and losing the last session member
-    /// this way founds a fresh session like any other loss (chapter 02
-    /// §7.3). Queued measurements through it are dropped; one in flight
-    /// runs into its retry budget (chapter 02 §4.2). No ByeBye is sent —
-    /// the spec names ByeBye only for exit and disable (chapter 01 §4.3);
-    /// pending link-wire-spec#9.
+    /// Close gateway `id` locally (chapter 01 §9.4), whatever the cause.
+    ///
+    /// 1. A ByeBye goes out on it first, under the current NodeId. It is
+    ///    best-effort: when the close is due to the address having gone the
+    ///    send fails silently.
+    /// 2. Its peer entries are removed (chapter 01 §7), including any it
+    ///    picked up after its address went (§9.3).
+    /// 3. Its channel entries and send paths are removed (chapter 03 §7.3).
+    /// 4. If that leaves no entry, on any gateway, for a member of the current
+    ///    session, the peer founds a fresh session (chapter 02 §7.3) before
+    ///    returning. The caller opens a scan's new gateways only after its
+    ///    closures, so they announce under the post-reset identity (§9.5).
+    ///
+    /// Queued measurements through the gateway are dropped; one in flight
+    /// runs into its retry budget (chapter 02 §4.2).
     pub fn close_gateway(&self, st: &mut State, id: usize) {
-        st.gateways.remove(&id);
+        if let Some(gw) = st.gateways.remove(&id) {
+            gw.send_multicast(&discovery::encode(&discovery::Frame::bye_bye(st.node)));
+        }
         let mut lost = Vec::new();
         st.peers.retain(|(n, g), _| {
             if *g == id {

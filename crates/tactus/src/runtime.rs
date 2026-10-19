@@ -139,6 +139,10 @@ fn spawn_rescan(eng: Arc<Engine>, epoch: u64, mut failed: HashSet<Ipv4Addr>) {
         if !st.enabled || st.epoch != epoch {
             return;
         }
+        // Closures first, then openings (chapter 01 §9.3). A session reset
+        // caused by the closures happens inside close_gateway, so the new
+        // gateways' immediate first Alives already carry the post-reset
+        // NodeId and session (§9.5).
         for addr in &plan.removed {
             let ids: Vec<usize> = st
                 .gateways
@@ -214,7 +218,12 @@ pub fn enable(eng: &Arc<Engine>) {
         Gateways::Auto => iface::initial(eng.interfaces.as_ref())
             .into_iter()
             .collect(),
-        Gateways::Explicit(addrs) => addrs.clone(),
+        // At most one gateway per address (chapter 01 §9.1): repeats in an
+        // explicit list are dropped, keeping the first.
+        Gateways::Explicit(addrs) => {
+            let mut seen = HashSet::new();
+            addrs.iter().copied().filter(|a| seen.insert(*a)).collect()
+        }
     };
     let mut failed = HashSet::new();
     for addr in addrs {
