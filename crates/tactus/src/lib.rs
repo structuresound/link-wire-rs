@@ -13,9 +13,8 @@
 //! multicast-capable and not point-to-point, and rescans every 5 s to open
 //! and close gateways as interfaces come and go (chapter 01 §2) — LAN peers
 //! are found with no host configuration. [`Gateways::Explicit`] pins an
-//! exact address list instead. IPv6 link-local gateways are not implemented
-//! yet. Pending link-wire-spec#9: a gateway closed by a rescan
-//! sends no ByeBye (remote peers age it out by ttl, chapter 01 §4.3, §7).
+//! exact address list instead. Gateway lifecycle follows chapter 01 §9.
+//! IPv6 link-local gateways are not implemented yet.
 
 mod audio;
 mod engine;
@@ -102,18 +101,20 @@ pub enum Gateways {
     /// `127.0.0.1` — always, so peers on the same host find each other
     /// (chapter 01 §2) — and on every IPv4 address whose interface is up,
     /// multicast-capable and not point-to-point. Interfaces are rescanned
-    /// every 5 s while enabled (chapter 01 §2, §8); a new address opens a
-    /// gateway that announces immediately (§4.1), a vanished one closes its
-    /// gateway and forgets the peers and channels learned through it
-    /// (chapter 01 §7, chapter 03 §7.3).
+    /// every 5 s while enabled (chapter 01 §9.3). Within a scan, closures
+    /// come before openings. A closing gateway sends a ByeBye (best-effort)
+    /// and takes with it the peers and channels learned through it (§9.4).
+    /// If that loses the last session member, the peer founds a fresh
+    /// session before the scan's new gateways announce (§9.5).
     ///
     /// Enumeration uses `getifaddrs` on unix (on Android: API level 24+)
     /// and `GetAdaptersAddresses` on Windows. Where neither exists, or a
     /// scan fails, the current gateways are kept (initially loopback only).
     #[default]
     Auto,
-    /// Exactly these addresses, opened on enable and never rescanned. An
-    /// empty list runs no gateways. Include `127.0.0.1` to keep same-host
+    /// Exactly these addresses, opened on enable and never rescanned. A
+    /// repeated address opens one gateway (chapter 01 §9.1). An empty list
+    /// runs no gateways. Include `127.0.0.1` to keep same-host
     /// discovery.
     Explicit(Vec<Ipv4Addr>),
 }

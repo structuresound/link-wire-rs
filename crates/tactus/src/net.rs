@@ -55,20 +55,25 @@ impl Gateway {
         // joined on this gateway's interface, delivery restricted to groups
         // joined on this socket where the platform supports it.
         //
-        // Both reuse options are required, and which one does the work depends
-        // on the platform. Linux honours SO_REUSEADDR alone for a wildcard UDP
-        // bind; macOS and the BSDs do NOT — there SO_REUSEADDR only relaxes the
-        // TCP TIME_WAIT rule, and a second wildcard bind on the same UDP port
-        // fails with EADDRINUSE unless every socket sharing it also sets
-        // SO_REUSEPORT. So a process opening a second gateway (two LinkRuntimes
-        // in one host, or a peer alongside another app) used to fail on macOS
-        // and work on Linux. Set both; SO_REUSEPORT must be set before bind.
+        // Which reuse option does the work depends on the platform. Linux
+        // honours SO_REUSEADDR alone for a wildcard UDP bind; macOS and the
+        // BSDs do NOT — there a second wildcard bind on the same UDP port fails
+        // with EADDRINUSE unless every socket sharing it sets SO_REUSEPORT
+        // (BSD stacks deliver multicast to every matching socket regardless;
+        // not exercised by the netns test below). SO_REUSEPORT must be set
+        // before bind.
         //
-        // Setting SO_REUSEPORT on Linux is safe here even though it enables
-        // load balancing for unicast: nothing addresses this port by unicast.
-        // Responses go to the sender's ephemeral `unicast` socket (engine.rs
-        // replies to the datagram's source), and multicast delivery still fans
-        // out to every socket joined to the group.
+        // Linux and Android must NOT set SO_REUSEPORT. There it puts the
+        // sockets into a load-balancing group, and each multicast datagram goes
+        // to exactly one socket of the group, chosen by hashing the sender's
+        // address and port. That ignores which interface each socket joined
+        // on: a LAN peer's Alives land on the loopback gateway's socket, or on
+        // another LAN gateway's, and are attributed to the wrong gateway. When
+        // the real gateway closes, the stray entry keeps the peer alive and the
+        // session-loss reset (chapter 01 §9.4, chapter 02 §7.3) never fires.
+        // Observed in a two-subnet netns rig and pinned by
+        // tests/gateway_netns.rs. The same hashing would split one host's
+        // discovery traffic between Link processes.
         let mcast = base_socket()?;
         mcast.set_reuse_address(true)?;
         // socket2 exposes set_reuse_port on unix minus the targets below; the
@@ -77,6 +82,8 @@ impl Gateway {
         #[cfg(all(
             unix,
             not(any(
+                target_os = "linux",
+                target_os = "android",
                 target_os = "solaris",
                 target_os = "illumos",
                 target_os = "cygwin",

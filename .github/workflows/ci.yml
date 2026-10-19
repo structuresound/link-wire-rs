@@ -38,10 +38,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test (vectors required)
+      # tests/gateway_netns.rs runs in an unprivileged user + network
+      # namespace; Ubuntu 24.04 runners forbid those by default (AppArmor).
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Test (vectors and network namespaces required)
         env:
           LINK_WIRE_SPEC_DIR: ${{ github.workspace }}/.spec-cache/link-wire-spec
           REQUIRE_VECTORS: "1"
+          REQUIRE_NETNS: "1"
         run: cargo test --workspace
 
   # Clean-room firewall: forbidden crates and copyleft licenses can never
